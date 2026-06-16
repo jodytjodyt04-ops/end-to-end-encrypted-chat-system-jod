@@ -1,0 +1,13 @@
+{
+  "name": "securechat-server",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.14.2",
+    "uuid": "^9.0.1"
+  }
+}
