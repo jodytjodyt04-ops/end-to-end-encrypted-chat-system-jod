@@ -3,7 +3,14 @@ import http from 'http';
 import { v4 as uuidv4 } from 'uuid';
 
 const PORT = process.env.PORT || 8080;
-const server = http.createServer();
+
+// Create an HTTP server that responds to any request with "OK"
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('SecureChat WebSocket server is running.');
+});
+
+// Attach WebSocket server to the same HTTP server
 const wss = new WebSocketServer({ server });
 
 const connections = new Map();
