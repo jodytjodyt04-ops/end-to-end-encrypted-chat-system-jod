@@ -15,19 +15,17 @@ const rooms = new Map();       // room -> Set of socketIds
 const roomHistory = new Map(); // room -> array of last 50 messages
 const typingUsers = new Map(); // room -> Set of usernames
 
-// Ping interval to keep connections alive
+// Ping all clients every 15 seconds to keep connections alive
 const pingInterval = setInterval(() => {
   wss.clients.forEach((ws) => {
     if (ws.readyState === WebSocket.OPEN) {
       ws.ping();
     }
   });
-}, 30000);
+}, 15000);
 
 wss.on('connection', (socket) => {
   const socketId = uuidv4();
-  let room = null;
-  let username = null;
 
   socket.on('message', (data) => {
     try {
@@ -41,19 +39,17 @@ wss.on('connection', (socket) => {
             socket.send(JSON.stringify({ type: 'ERROR', message: 'Missing fields' }));
             return;
           }
-          room = r;
-          username = u;
-          connections.set(socketId, { socket, room, username, publicKey });
-          if (!rooms.has(room)) rooms.set(room, new Set());
-          rooms.get(room).add(socketId);
-          socket.send(JSON.stringify({ type: 'JOINED', socketId, room, username }));
+          connections.set(socketId, { socket, room: r, username: u, publicKey });
+          if (!rooms.has(r)) rooms.set(r, new Set());
+          rooms.get(r).add(socketId);
+          socket.send(JSON.stringify({ type: 'JOINED', socketId, room: r, username: u }));
 
           // Send history
-          const history = roomHistory.get(room) || [];
+          const history = roomHistory.get(r) || [];
           socket.send(JSON.stringify({ type: 'HISTORY', messages: history }));
 
-          broadcastToRoom(room, { type: 'USER_JOINED', username, totalUsers: rooms.get(room).size });
-          console.log(`👤 ${username} joined ${room} (Total: ${rooms.get(room).size})`);
+          broadcastToRoom(r, { type: 'USER_JOINED', username: u, totalUsers: rooms.get(r).size });
+          console.log(`👤 ${u} joined ${r} (Total: ${rooms.get(r).size})`);
           break;
         }
 
@@ -73,7 +69,7 @@ wss.on('connection', (socket) => {
           });
           if (history.length > 50) history.shift();
 
-          // Broadcast to room (including sender)
+          // Broadcast to all in room (including sender)
           broadcastToRoom(conn.room, {
             type: 'MESSAGE',
             from: conn.username,
@@ -93,6 +89,7 @@ wss.on('connection', (socket) => {
           const typingSet = typingUsers.get(r);
           if (isTyping) typingSet.add(conn.username);
           else typingSet.delete(conn.username);
+          // Broadcast to all in room (including sender)
           broadcastToRoom(r, { type: 'TYPING', username: conn.username, isTyping });
           break;
         }
@@ -148,8 +145,7 @@ wss.on('connection', (socket) => {
     console.error(`Socket error ${socketId}:`, err);
   });
 
-  // Handle pong to keep connection alive
-  socket.on('pong', () => { /* connection alive */ });
+  // Respond to ping with pong automatically (WS handles this)
 });
 
 function broadcastToRoom(room, message) {
@@ -166,7 +162,6 @@ server.listen(PORT, () => {
   console.log(`🚀 SecureChat server running on ws://localhost:${PORT}`);
 });
 
-// Clean up interval on server close
 process.on('SIGINT', () => {
   clearInterval(pingInterval);
   server.close(() => process.exit(0));
