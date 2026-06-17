@@ -12,31 +12,43 @@ const wss = new WebSocketServer({ server });
 
 const connections = new Map(); // socketId -> { socket, room, username, publicKey }
 const rooms = new Map();       // room -> Set of socketIds
-const roomHistory = new Map(); // room -> array of last 50 messages (each with id, from, text, timestamp, type, file?)
-const typingUsers = new Map(); // room -> Set of usernames currently typing
+const roomHistory = new Map(); // room -> array of last 50 messages
+const typingUsers = new Map(); // room -> Set of usernames
+
+// Ping interval to keep connections alive
+const pingInterval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.ping();
+    }
+  });
+}, 30000);
 
 wss.on('connection', (socket) => {
   const socketId = uuidv4();
+  let room = null;
+  let username = null;
 
   socket.on('message', (data) => {
     try {
       const msg = JSON.parse(data);
       const conn = connections.get(socketId);
-      if (!conn && msg.type !== 'JOIN_ROOM') return;
 
       switch (msg.type) {
         case 'JOIN_ROOM': {
-          const { room, username, publicKey } = msg;
-          if (!room || !username || !publicKey) {
+          const { room: r, username: u, publicKey } = msg;
+          if (!r || !u || !publicKey) {
             socket.send(JSON.stringify({ type: 'ERROR', message: 'Missing fields' }));
             return;
           }
+          room = r;
+          username = u;
           connections.set(socketId, { socket, room, username, publicKey });
           if (!rooms.has(room)) rooms.set(room, new Set());
           rooms.get(room).add(socketId);
           socket.send(JSON.stringify({ type: 'JOINED', socketId, room, username }));
 
-          // Send history (last 50 messages) to the new user
+          // Send history
           const history = roomHistory.get(room) || [];
           socket.send(JSON.stringify({ type: 'HISTORY', messages: history }));
 
@@ -46,28 +58,26 @@ wss.on('connection', (socket) => {
         }
 
         case 'SEND_MESSAGE': {
-          const { room, encryptedMessage, from, fromPublicKey, messageId, fileInfo } = msg;
-          const sender = connections.get(socketId);
-          if (!sender) return;
+          if (!conn) return;
+          const { encryptedMessage, from, fromPublicKey, messageId, fileInfo } = msg;
           // Store in history
-          if (!roomHistory.has(room)) roomHistory.set(room, []);
-          const history = roomHistory.get(room);
+          if (!roomHistory.has(conn.room)) roomHistory.set(conn.room, []);
+          const history = roomHistory.get(conn.room);
           history.push({
             id: messageId || uuidv4(),
-            from: sender.username,
-            fromPublicKey: sender.publicKey,
+            from: conn.username,
+            fromPublicKey: conn.publicKey,
             encryptedMessage,
             timestamp: new Date().toISOString(),
             fileInfo: fileInfo || null,
           });
-          // Keep only last 50
           if (history.length > 50) history.shift();
 
-          // Broadcast to room, including sender info
-          broadcastToRoom(room, {
+          // Broadcast to room (including sender)
+          broadcastToRoom(conn.room, {
             type: 'MESSAGE',
-            from: sender.username,
-            fromPublicKey: sender.publicKey,
+            from: conn.username,
+            fromPublicKey: conn.publicKey,
             encryptedMessage,
             timestamp: new Date().toISOString(),
             messageId: messageId || uuidv4(),
@@ -77,38 +87,24 @@ wss.on('connection', (socket) => {
         }
 
         case 'TYPING': {
-          const { room, isTyping } = msg;
-          const sender = connections.get(socketId);
-          if (!sender) return;
-          if (!typingUsers.has(room)) typingUsers.set(room, new Set());
-          const typingSet = typingUsers.get(room);
-          if (isTyping) {
-            typingSet.add(sender.username);
-          } else {
-            typingSet.delete(sender.username);
-          }
-          broadcastToRoom(room, {
-            type: 'TYPING',
-            username: sender.username,
-            isTyping,
-          });
+          if (!conn) return;
+          const { room: r, isTyping } = msg;
+          if (!typingUsers.has(r)) typingUsers.set(r, new Set());
+          const typingSet = typingUsers.get(r);
+          if (isTyping) typingSet.add(conn.username);
+          else typingSet.delete(conn.username);
+          broadcastToRoom(r, { type: 'TYPING', username: conn.username, isTyping });
           break;
         }
 
         case 'READ_RECEIPT': {
-          const { room, messageId } = msg;
-          const sender = connections.get(socketId);
-          if (!sender) return;
-          broadcastToRoom(room, {
-            type: 'READ_RECEIPT',
-            messageId,
-            username: sender.username,
-          });
+          if (!conn) return;
+          const { room: r, messageId } = msg;
+          broadcastToRoom(r, { type: 'READ_RECEIPT', messageId, username: conn.username });
           break;
         }
 
         case 'GET_USERS': {
-          const conn = connections.get(socketId);
           if (!conn) return;
           const users = [];
           rooms.get(conn.room)?.forEach(id => {
@@ -132,7 +128,6 @@ wss.on('connection', (socket) => {
     const conn = connections.get(socketId);
     if (conn) {
       const { room, username } = conn;
-      // Remove from typing set
       if (typingUsers.has(room)) {
         typingUsers.get(room).delete(username);
       }
@@ -145,8 +140,16 @@ wss.on('connection', (socket) => {
         broadcastToRoom(room, { type: 'USER_LEFT', username, totalUsers: rooms.get(room)?.size || 0 });
       }
       connections.delete(socketId);
+      console.log(`❌ ${username} left ${room}`);
     }
   });
+
+  socket.on('error', (err) => {
+    console.error(`Socket error ${socketId}:`, err);
+  });
+
+  // Handle pong to keep connection alive
+  socket.on('pong', () => { /* connection alive */ });
 });
 
 function broadcastToRoom(room, message) {
@@ -161,4 +164,10 @@ function broadcastToRoom(room, message) {
 
 server.listen(PORT, () => {
   console.log(`🚀 SecureChat server running on ws://localhost:${PORT}`);
+});
+
+// Clean up interval on server close
+process.on('SIGINT', () => {
+  clearInterval(pingInterval);
+  server.close(() => process.exit(0));
 });
