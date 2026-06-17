@@ -15,14 +15,8 @@ const rooms = new Map();       // room -> Set of socketIds
 const roomHistory = new Map(); // room -> array of last 50 messages
 const typingUsers = new Map(); // room -> Set of usernames
 
-// Ping all clients every 15 seconds to keep connections alive
-const pingInterval = setInterval(() => {
-  wss.clients.forEach((ws) => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.ping();
-    }
-  });
-}, 15000);
+// Keep track of last activity per socket to detect stale connections
+const lastActivity = new Map();
 
 wss.on('connection', (socket) => {
   const socketId = uuidv4();
@@ -31,6 +25,9 @@ wss.on('connection', (socket) => {
     try {
       const msg = JSON.parse(data);
       const conn = connections.get(socketId);
+
+      // Update last activity
+      lastActivity.set(socketId, Date.now());
 
       switch (msg.type) {
         case 'JOIN_ROOM': {
@@ -44,7 +41,6 @@ wss.on('connection', (socket) => {
           rooms.get(r).add(socketId);
           socket.send(JSON.stringify({ type: 'JOINED', socketId, room: r, username: u }));
 
-          // Send history
           const history = roomHistory.get(r) || [];
           socket.send(JSON.stringify({ type: 'HISTORY', messages: history }));
 
@@ -56,7 +52,6 @@ wss.on('connection', (socket) => {
         case 'SEND_MESSAGE': {
           if (!conn) return;
           const { encryptedMessage, from, fromPublicKey, messageId, fileInfo } = msg;
-          // Store in history
           if (!roomHistory.has(conn.room)) roomHistory.set(conn.room, []);
           const history = roomHistory.get(conn.room);
           history.push({
@@ -69,7 +64,6 @@ wss.on('connection', (socket) => {
           });
           if (history.length > 50) history.shift();
 
-          // Broadcast to all in room (including sender)
           broadcastToRoom(conn.room, {
             type: 'MESSAGE',
             from: conn.username,
@@ -89,7 +83,6 @@ wss.on('connection', (socket) => {
           const typingSet = typingUsers.get(r);
           if (isTyping) typingSet.add(conn.username);
           else typingSet.delete(conn.username);
-          // Broadcast to all in room (including sender)
           broadcastToRoom(r, { type: 'TYPING', username: conn.username, isTyping });
           break;
         }
@@ -109,6 +102,12 @@ wss.on('connection', (socket) => {
             if (c && id !== socketId) users.push({ username: c.username, publicKey: c.publicKey });
           });
           socket.send(JSON.stringify({ type: 'USERS_LIST', users }));
+          break;
+        }
+
+        case 'PING': {
+          // Respond to application-level ping
+          socket.send(JSON.stringify({ type: 'PONG' }));
           break;
         }
 
@@ -137,6 +136,7 @@ wss.on('connection', (socket) => {
         broadcastToRoom(room, { type: 'USER_LEFT', username, totalUsers: rooms.get(room)?.size || 0 });
       }
       connections.delete(socketId);
+      lastActivity.delete(socketId);
       console.log(`❌ ${username} left ${room}`);
     }
   });
@@ -144,8 +144,6 @@ wss.on('connection', (socket) => {
   socket.on('error', (err) => {
     console.error(`Socket error ${socketId}:`, err);
   });
-
-  // Respond to ping with pong automatically (WS handles this)
 });
 
 function broadcastToRoom(room, message) {
@@ -158,11 +156,25 @@ function broadcastToRoom(room, message) {
   });
 }
 
+// Clean up stale connections every minute (optional)
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, last] of lastActivity) {
+    if (now - last > 60000) { // 60 seconds timeout
+      const conn = connections.get(id);
+      if (conn) {
+        conn.socket.terminate(); // force close
+        connections.delete(id);
+        lastActivity.delete(id);
+      }
+    }
+  }
+}, 30000);
+
 server.listen(PORT, () => {
   console.log(`🚀 SecureChat server running on ws://localhost:${PORT}`);
 });
 
 process.on('SIGINT', () => {
-  clearInterval(pingInterval);
   server.close(() => process.exit(0));
 });
