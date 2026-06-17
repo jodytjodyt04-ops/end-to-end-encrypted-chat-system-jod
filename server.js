@@ -15,9 +15,6 @@ const rooms = new Map();       // room -> Set of socketIds
 const roomHistory = new Map(); // room -> array of last 50 messages
 const typingUsers = new Map(); // room -> Set of usernames
 
-// Keep track of last activity per socket to detect stale connections
-const lastActivity = new Map();
-
 wss.on('connection', (socket) => {
   const socketId = uuidv4();
 
@@ -25,9 +22,6 @@ wss.on('connection', (socket) => {
     try {
       const msg = JSON.parse(data);
       const conn = connections.get(socketId);
-
-      // Update last activity
-      lastActivity.set(socketId, Date.now());
 
       switch (msg.type) {
         case 'JOIN_ROOM': {
@@ -106,7 +100,7 @@ wss.on('connection', (socket) => {
         }
 
         case 'PING': {
-          // Respond to application-level ping
+          // Respond with PONG to keep the connection alive
           socket.send(JSON.stringify({ type: 'PONG' }));
           break;
         }
@@ -136,7 +130,6 @@ wss.on('connection', (socket) => {
         broadcastToRoom(room, { type: 'USER_LEFT', username, totalUsers: rooms.get(room)?.size || 0 });
       }
       connections.delete(socketId);
-      lastActivity.delete(socketId);
       console.log(`❌ ${username} left ${room}`);
     }
   });
@@ -155,21 +148,6 @@ function broadcastToRoom(room, message) {
     }
   });
 }
-
-// Clean up stale connections every minute (optional)
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, last] of lastActivity) {
-    if (now - last > 60000) { // 60 seconds timeout
-      const conn = connections.get(id);
-      if (conn) {
-        conn.socket.terminate(); // force close
-        connections.delete(id);
-        lastActivity.delete(id);
-      }
-    }
-  }
-}, 30000);
 
 server.listen(PORT, () => {
   console.log(`🚀 SecureChat server running on ws://localhost:${PORT}`);
