@@ -12,7 +12,7 @@ const wss = new WebSocketServer({ server });
 
 const connections = new Map(); // socketId -> { socket, room, username, publicKey }
 const rooms = new Map();       // room -> Set of socketIds
-const roomHistory = new Map(); // room -> array of last 50 messages
+const roomHistory = new Map(); // room -> array of messages with { id, from, fromPublicKey, encryptedMessage, timestamp, fileInfo, replyToId, deleted }
 const typingUsers = new Map(); // room -> Set of usernames
 
 wss.on('connection', (socket) => {
@@ -45,28 +45,61 @@ wss.on('connection', (socket) => {
 
         case 'SEND_MESSAGE': {
           if (!conn) return;
-          const { encryptedMessage, from, fromPublicKey, messageId, fileInfo } = msg;
+          const { encryptedMessage, from, fromPublicKey, messageId, fileInfo, replyToId } = msg;
           if (!roomHistory.has(conn.room)) roomHistory.set(conn.room, []);
           const history = roomHistory.get(conn.room);
-          history.push({
+          const newMsg = {
             id: messageId || uuidv4(),
             from: conn.username,
             fromPublicKey: conn.publicKey,
             encryptedMessage,
             timestamp: new Date().toISOString(),
             fileInfo: fileInfo || null,
-          });
+            replyToId: replyToId || null,
+            deleted: false,
+          };
+          history.push(newMsg);
           if (history.length > 50) history.shift();
 
           broadcastToRoom(conn.room, {
             type: 'MESSAGE',
-            from: conn.username,
-            fromPublicKey: conn.publicKey,
-            encryptedMessage,
-            timestamp: new Date().toISOString(),
-            messageId: messageId || uuidv4(),
-            fileInfo: fileInfo || null,
+            ...newMsg,
           });
+          break;
+        }
+
+        case 'DELETE_MESSAGE': {
+          if (!conn) return;
+          const { messageId, forEveryone } = msg;
+          const history = roomHistory.get(conn.room);
+          if (!history) return;
+          const idx = history.findIndex(m => m.id === messageId);
+          if (idx === -1) return;
+          const targetMsg = history[idx];
+          // Only allow deletion if it's the sender or forEveryone flag is true (for self-delete we also allow)
+          if (targetMsg.from !== conn.username && !forEveryone) return;
+          if (forEveryone) {
+            // Mark as deleted for everyone
+            targetMsg.deleted = true;
+          } else {
+            // For self-delete, we just remove from history for this user? Actually we need to keep for others.
+            // We'll broadcast a SELF_DELETE event so clients can hide it locally.
+            broadcastToRoom(conn.room, {
+              type: 'SELF_DELETE',
+              messageId: messageId,
+              username: conn.username,
+            });
+            // Remove from history for this user? But history is per room, not per user.
+            // Better: client will handle self-delete by hiding the message locally.
+            // So we just broadcast SELF_DELETE and do not modify history.
+          }
+          // For everyone delete, broadcast DELETED event
+          if (forEveryone) {
+            broadcastToRoom(conn.room, {
+              type: 'MESSAGE_DELETED',
+              messageId: messageId,
+            });
+          }
           break;
         }
 
@@ -100,7 +133,6 @@ wss.on('connection', (socket) => {
         }
 
         case 'PING': {
-          // Respond with PONG to keep the connection alive
           socket.send(JSON.stringify({ type: 'PONG' }));
           break;
         }
