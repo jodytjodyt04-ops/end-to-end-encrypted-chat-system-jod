@@ -12,7 +12,7 @@ const wss = new WebSocketServer({ server });
 
 const connections = new Map(); // socketId -> { socket, room, username, publicKey }
 const rooms = new Map();       // room -> Set of socketIds
-const roomHistory = new Map(); // room -> array of messages with { id, from, fromPublicKey, encryptedMessage, timestamp, fileInfo, replyToId, deleted }
+const roomHistory = new Map(); // room -> array of messages
 const typingUsers = new Map(); // room -> Set of usernames
 
 wss.on('connection', (socket) => {
@@ -39,7 +39,7 @@ wss.on('connection', (socket) => {
           socket.send(JSON.stringify({ type: 'HISTORY', messages: history }));
 
           broadcastToRoom(r, { type: 'USER_JOINED', username: u, totalUsers: rooms.get(r).size });
-          console.log(`👤 ${u} joined ${r} (Total: ${rooms.get(r).size})`);
+          console.log(`👤 ${u} joined ${r}`);
           break;
         }
 
@@ -60,11 +60,7 @@ wss.on('connection', (socket) => {
           };
           history.push(newMsg);
           if (history.length > 50) history.shift();
-
-          broadcastToRoom(conn.room, {
-            type: 'MESSAGE',
-            ...newMsg,
-          });
+          broadcastToRoom(conn.room, { type: 'MESSAGE', ...newMsg });
           break;
         }
 
@@ -76,29 +72,32 @@ wss.on('connection', (socket) => {
           const idx = history.findIndex(m => m.id === messageId);
           if (idx === -1) return;
           const targetMsg = history[idx];
-          // Only allow deletion if it's the sender or forEveryone flag is true (for self-delete we also allow)
-          if (targetMsg.from !== conn.username && !forEveryone) return;
+          if (forEveryone && targetMsg.from !== conn.username) return;
           if (forEveryone) {
-            // Mark as deleted for everyone
             targetMsg.deleted = true;
+            broadcastToRoom(conn.room, { type: 'MESSAGE_DELETED', messageId });
           } else {
-            // For self-delete, we just remove from history for this user? Actually we need to keep for others.
-            // We'll broadcast a SELF_DELETE event so clients can hide it locally.
-            broadcastToRoom(conn.room, {
-              type: 'SELF_DELETE',
-              messageId: messageId,
-              username: conn.username,
-            });
-            // Remove from history for this user? But history is per room, not per user.
-            // Better: client will handle self-delete by hiding the message locally.
-            // So we just broadcast SELF_DELETE and do not modify history.
+            broadcastToRoom(conn.room, { type: 'SELF_DELETE', messageId, username: conn.username });
           }
-          // For everyone delete, broadcast DELETED event
-          if (forEveryone) {
-            broadcastToRoom(conn.room, {
-              type: 'MESSAGE_DELETED',
-              messageId: messageId,
-            });
+          break;
+        }
+
+        // ---- WebRTC Signaling ----
+        case 'CALL_OFFER':
+        case 'CALL_ANSWER':
+        case 'CALL_CANDIDATE':
+        case 'CALL_END': {
+          if (!conn) return;
+          // Relay to target user in same room
+          const targetSocketId = msg.targetSocketId;
+          const targetConn = connections.get(targetSocketId);
+          if (targetConn && targetConn.socket.readyState === WebSocket.OPEN) {
+            targetConn.socket.send(JSON.stringify({
+              type: msg.type,
+              from: conn.username,
+              fromSocketId: socketId,
+              payload: msg.payload || null,
+            }));
           }
           break;
         }
@@ -126,7 +125,7 @@ wss.on('connection', (socket) => {
           const users = [];
           rooms.get(conn.room)?.forEach(id => {
             const c = connections.get(id);
-            if (c && id !== socketId) users.push({ username: c.username, publicKey: c.publicKey });
+            if (c && id !== socketId) users.push({ username: c.username, publicKey: c.publicKey, socketId: id });
           });
           socket.send(JSON.stringify({ type: 'USERS_LIST', users }));
           break;
@@ -150,9 +149,7 @@ wss.on('connection', (socket) => {
     const conn = connections.get(socketId);
     if (conn) {
       const { room, username } = conn;
-      if (typingUsers.has(room)) {
-        typingUsers.get(room).delete(username);
-      }
+      if (typingUsers.has(room)) typingUsers.get(room).delete(username);
       rooms.get(room)?.delete(socketId);
       if (rooms.get(room)?.size === 0) {
         rooms.delete(room);
